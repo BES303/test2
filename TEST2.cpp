@@ -125,7 +125,7 @@ void drawEmotions(const pbio::Context& data, cv::Mat& image)
         const pbio::Context& emotions = obj.at("emotions");
         cv::Point text_point{ std::min(static_cast<int>(obj.at("bbox")[2].getDouble() * width), width),
                              std::max(static_cast<int>(obj.at("bbox")[1].getDouble() * heigth), 0) + 15 + currentY };
-        currentY += 30;
+        currentY += 90;
 
         std::set<std::pair<double, std::string>> results;
         for (size_t i = 0; i < emotions.size(); ++i)
