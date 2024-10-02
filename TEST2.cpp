@@ -47,10 +47,8 @@ void putTextWithRightExpansion(cv::Mat& img, const std::string& text, cv::Point 
     cv::putText(img, text, org, fontFace, fontScale, color, thickness, lineType, bottomLeftOrigin);
 }
 
-void drawObjects(const pbio::Context& data, cv::Mat& image, std::string class_filter = std::string())
+void drawObjects(const pbio::Context& data, cv::Mat& image, const int width, const int heigth, std::string class_filter = std::string())
 {
-    const auto width = image.size[1];
-    const auto heigth = image.size[0];
     for (const auto& obj : data.at("objects"))
     {
         std::string class_name = obj.at("class").getString();
@@ -98,24 +96,19 @@ void drawObjects(const pbio::Context& data, cv::Mat& image, std::string class_fi
     }
 }
 
-void drawFaceKeypoint(const pbio::Context& data, cv::Mat& image)
+void drawFaceKeypoint(const pbio::Context& data, cv::Mat& image, const int width, const int heigth)
 {
-    const auto width = image.size[1];
-    const auto heigth = image.size[0];
-
     for (const auto& obj : data.at("objects"))
     {
         for (const auto& point : obj.at("keypoints").at("points"))
         {
-            cv::circle(image, cv::Point2f(point["proj"][0].getDouble() * image.size[1], point["proj"][1].getDouble() * image.size[0]), 2, { 0, 255, 0 }, 5);
+            cv::circle(image, cv::Point2f(point["proj"][0].getDouble() * width, point["proj"][1].getDouble() * heigth), 2, { 0, 255, 0 }, 5);
         }
     }
 }
 
-void drawEmotions(const pbio::Context& data, cv::Mat& image)
+void drawEmotions(const pbio::Context& data, cv::Mat& image, const int width, const int heigth)
 {
-    const auto width = image.size[1];
-    const auto heigth = image.size[0];
     for (const auto& obj : data.at("objects"))
     {
         std::string class_name = obj.at("class").getString();
@@ -158,12 +151,9 @@ void drawEmotions(const pbio::Context& data, cv::Mat& image)
     }
 }
 
-void drawAgeGenderMaskQuality(const pbio::Context& data, cv::Mat& image, const std::string& className)
+void drawAgeGenderMaskQuality(const pbio::Context& data, cv::Mat& image, const std::string& className, const int width, const int heigth)
 {
-    const auto width = image.size[1];
-    const auto heigth = image.size[0];
     cv::Mat image_copy = image.clone();
-
     int objects_counter = 1;
     for (const auto& obj : data.at("objects"))
     {
@@ -201,15 +191,13 @@ void drawAgeGenderMaskQuality(const pbio::Context& data, cv::Mat& image, const s
                 face.copyTo(draw_roi);
                 objects_counter++;
             }
+
         }
     }
 }
 
-void drawLiveness(const pbio::Context& data, cv::Mat& image)
+void drawLiveness(const pbio::Context& data, cv::Mat& image, const int width, const int heigth)
 {
-    const auto width = image.size[1];
-    const auto heigth = image.size[0];
-
     for (const auto& obj : data.at("objects"))
     {
         if (obj.at("class").getString().compare("face"))
@@ -246,12 +234,8 @@ const std::map<std::string, std::string> unitTypes
     {"quality", "QUALITY_ASSESSMENT_ESTIMATOR"},
 };
 
-
-
 pbio::Context createFaceDetector(pbio::FacerecService& service);
 pbio::Context createFaceFitter(pbio::FacerecService& service);
-
-
 
 int main(int argc, char** argv)
 {
@@ -290,8 +274,78 @@ int main(int argc, char** argv)
 
         std::cout << "Library version: " << service->getVersion() << std::endl << std::endl;
 
+        std::map<std::string, std::vector<std::unique_ptr<pbio::ProcessingBlock>>> processingBlocksMap;
+
+        for (const auto& unit_type : unit_types)
+        {
+            auto configCtx = service->createContext();
+
+            if (unitTypes.find(unit_type) == unitTypes.end())
+                throw pbio::Error(0x917ca17f, "unit_type not found");
+
+            configCtx["unit_type"] = unitTypes.at(unit_type);
+            configCtx["ONNXRuntime"]["library_path"] = lib_dir;
+
+            if (!modification.empty())
+                configCtx["modification"] = modification;
+            if (!version.empty())
+                configCtx["version"] = std::stoll(version);
+
+            if (unit_type == "quality")
+                configCtx["config_name"] = "quality_assessment.xml";
+
+            if (unit_type == "liveness")
+            {
+                configCtx["config_name"] = "liveness_2d_estimator_v3.xml";
+                configCtx["sdk_path"] = sdk_dir;
+                configCtx["facerec_conf_dir"] = sdk_dir + "/conf/facerec/";
+            }
+
+            auto processingBlock = std::make_unique<pbio::ProcessingBlock>(service->createProcessingBlock(configCtx));
+            if (unit_type == "quality" || unit_type == "liveness")
+            {
+                processingBlocksMap[unit_type].push_back(std::make_unique<pbio::ProcessingBlock>(service->createProcessingBlock(createFaceDetector(*service))));
+                processingBlocksMap[unit_type].push_back(std::make_unique<pbio::ProcessingBlock>(service->createProcessingBlock(createFaceFitter(*service))));
+                processingBlocksMap[unit_type].push_back(std::move(processingBlock));
+            }
+            else if (!unit_type.compare("emotions") || !unit_type.compare("gender") ||
+                !unit_type.compare("age") || !unit_type.compare("mask"))
+            {
+                processingBlocksMap[unit_type].push_back(std::make_unique<pbio::ProcessingBlock>(service->createProcessingBlock(createFaceDetector(*service))));
+
+                if (unit_type.compare("face_keypoint"))
+                {
+                    auto fitterCtx = service->createContext();
+                    fitterCtx["unit_type"] = unitTypes.at("face_keypoint");
+                    processingBlocksMap[unit_type].push_back(std::make_unique<pbio::ProcessingBlock>(service->createProcessingBlock(fitterCtx)));
+                }
+
+                processingBlocksMap[unit_type].push_back(std::move(processingBlock));
+            }
+            else if (!unit_type.compare("face_keypoint"))
+            {
+                processingBlocksMap[unit_type].push_back(std::make_unique<pbio::ProcessingBlock>(service->createProcessingBlock(createFaceDetector(*service))));
+                processingBlocksMap[unit_type].push_back(std::make_unique<pbio::ProcessingBlock>(service->createProcessingBlock(createFaceFitter(*service))));
+                processingBlocksMap[unit_type].push_back(std::move(processingBlock));
+            }
+            else
+            {
+                if (!unit_type.compare("pose"))
+                {
+                    auto modelDetectorCtx = service->createContext();
+                    modelDetectorCtx["unit_type"] = unitTypes.at("body");
+                    modelDetectorCtx["ONNXRuntime"]["library_path"] = lib_dir;
+                    modelDetectorCtx["confidence_threshold"] = 0.4;
+                    modelDetectorCtx["iou_threshold"] = 0.45;
+                    processingBlocksMap[unit_type].push_back(std::make_unique<pbio::ProcessingBlock>(service->createProcessingBlock(modelDetectorCtx)));
+                }
+                processingBlocksMap[unit_type].push_back(std::move(processingBlock));
+            }
+        }
+
         cv::VideoCapture cap(0);
         cv::Mat frame;
+
 
         if (!cap.isOpened())
         {
@@ -307,95 +361,35 @@ int main(int argc, char** argv)
                 std::cerr << "Empty frame captured!" << std::endl;
                 break;
             }
-            pbio::Context ioData = service->createContextFromFrame(frame.data, frame.cols, frame.rows, pbio::Context::Format::FORMAT_RGB, 0);
-
+            pbio::Context ioData = service->createContextFromFrame(frame.data, frame.size[1], frame.size[0], pbio::Context::Format::FORMAT_RGB, 0);
+            const auto originalWidth = frame.size[1];
+            const auto originalHeight = frame.size[0];
             for (const auto& unit_type : unit_types)
             {
+                auto& blocksForUnitType = processingBlocksMap[unit_type];
 
-                auto configCtx = service->createContext();
-
-                if (unitTypes.find(unit_type) == unitTypes.end())
-                    throw pbio::Error(0x917ca17f, "unit_type not found");
-
-                configCtx["unit_type"] = unitTypes.at(unit_type);
-                configCtx["ONNXRuntime"]["library_path"] = lib_dir;
-                if (!modification.empty())
-                    configCtx["modification"] = modification;
-                if (!version.empty())
-                    configCtx["version"] = std::stoll(version);
-
-                if (unit_type == "quality")
-                    configCtx["config_name"] = "quality_assessment.xml";
-
-                if (unit_type == "liveness")
+                for (const auto& block : blocksForUnitType)
                 {
-                    configCtx["config_name"] = "liveness_2d_estimator_v3.xml";
-                    configCtx["sdk_path"] = sdk_dir;
-                    configCtx["facerec_conf_dir"] = sdk_dir + "/conf/facerec/";
-                }
-
-                pbio::ProcessingBlock processingBlock = service->createProcessingBlock(configCtx);
-
-                if (unit_type == "quality" || unit_type == "liveness")
-                {
-                    pbio::ProcessingBlock faceDetector = service->createProcessingBlock(createFaceDetector(*service));
-                    pbio::ProcessingBlock faceFitter = service->createProcessingBlock(createFaceFitter(*service));
-
-                    faceDetector(ioData);
-                    faceFitter(ioData);
-                    processingBlock(ioData);
-                }
-                else if (!unit_type.compare("emotions") || !unit_type.compare("gender") ||
-                    !unit_type.compare("age") || !unit_type.compare("mask"))
-                {
-                    pbio::ProcessingBlock faceDetector = service->createProcessingBlock(createFaceDetector(*service));
-
-                    faceDetector(ioData);
-
-                    if (unit_type.compare("face_keypoint"))
-                    {
-                        auto fitterCtx = service->createContext();
-                        fitterCtx["unit_type"] = unitTypes.at("face_keypoint");
-                        pbio::ProcessingBlock fitterBlock = service->createProcessingBlock(fitterCtx);
-                        fitterBlock(ioData);
-                    }
-
-                    processingBlock(ioData);
-                }
-                else
-                {
-                    if (!unit_type.compare("pose"))
-                    {
-                        auto modelDetectorCtx = service->createContext();
-                        modelDetectorCtx["unit_type"] = unitTypes.at("body");
-                        modelDetectorCtx["ONNXRuntime"]["library_path"] = lib_dir;
-                        modelDetectorCtx["confidence_threshold"] = 0.4;
-                        modelDetectorCtx["iou_threshold"] = 0.45;
-                        pbio::ProcessingBlock  bodyDetector = service->createProcessingBlock(modelDetectorCtx);
-                        bodyDetector(ioData);
-                    }
-
-                    processingBlock(ioData);
+                    (*block)(ioData);
                 }
 
                 if (ioData.isNone() || !ioData.contains("objects"))
                     std::cerr << "No objects have been detected!" << std::endl;
                 else if (!unit_type.compare("body") || !unit_type.compare("pose"))
-                    drawObjects(ioData, frame, "body");
+                    drawObjects(ioData, frame, originalWidth, originalHeight, "body");
                 else if (!unit_type.compare("face"))
-                    drawObjects(ioData, frame, "face");
+                    drawObjects(ioData, frame, originalWidth, originalHeight, "face");
                 else if (!unit_type.compare("face_keypoint"))
-                    drawFaceKeypoint(ioData, frame);
+                    drawFaceKeypoint(ioData, frame, originalWidth, originalHeight);
                 else if (!unit_type.compare("objects"))
-                    drawObjects(ioData, frame);
+                    drawObjects(ioData, frame, originalWidth, originalHeight);
                 else if (!unit_type.compare("emotions"))
-                    drawEmotions(ioData, frame);
+                    drawEmotions(ioData, frame, originalWidth, originalHeight);
                 else if (!unit_type.compare("age") || !unit_type.compare("gender") || !unit_type.compare("mask") || !unit_type.compare("quality"))
-                    drawAgeGenderMaskQuality(ioData, frame, unit_type);
+                    drawAgeGenderMaskQuality(ioData, frame, unit_type, originalWidth, originalHeight);
                 else if (unit_type.find("liveness") != std::string::npos)
-                    drawLiveness(ioData, frame);
+                    drawLiveness(ioData, frame, originalWidth, originalHeight);
             }
-
             cv::imshow("frame", frame);
             if (cv::waitKey(1) >= 0)
                 break;
